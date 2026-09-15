@@ -1,0 +1,232 @@
+version: 2
+models:
+  - name: stg_customers
+    columns:
+      - name: customer_id
+        tests:
+          - unique  
+          - not_null
+      - name: customer_unique_id
+        tests:
+          - not_null
+  - name: stg_orders
+    columns:
+      - name: order_id
+        tests:
+          - unique
+          - not_null
+      - name: order_status
+        tests:
+          - accepted_values: 
+              values: ['unavailable', 'approved', 'invoiced', 'processing', 'canceled', 'shipped', 'delivered', 'created']
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+  - name: stg_order_items
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name:  product_id
+        tests:
+          - relationships:
+              to: ref('stg_products') 
+              field: product_id
+      - name: seller_id
+        tests:  
+          - relationships:
+              to: ref('stg_sellers')
+              field: seller_id      
+  - name: stg_order_payments
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+  - name: stg_order_reviews
+    columns:
+      - name: order_id
+        tests:
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+  - name: stg_products
+    columns:
+      - name: product_id
+        tests:
+          - not_null
+          - unique
+  - name: stg_sellers
+    columns:
+      - name: seller_id
+        tests:
+          - not_null
+          - unique
+  - name: int_payments_aggregated_orders
+    description: >
+        One row per order. Payments arrive at payment grain (multiple rows
+        per order for installments and split payment methods); this rolls
+        them up so order-grain models can join without fanning out.
+    columns:
+      - name: order_id
+        tests:
+          - unique
+          - not_null
+      - name: total_payment_value
+        tests:
+          - not_null
+  - name: int_customers_deduplicated
+    description: >
+        One row per customer_unique_id (the stable person identifier).
+        Olist issues a new customer_id per order, so stg_customers has one
+        row per order. Location taken from the customer's most recent order
+    columns:
+      - name: customer_unique_id
+        tests:
+          - unique
+          - not_null
+  - name: fct_order_items
+    description: One row per item within an order. An order with three products produces three rows.
+    columns:
+      - name: order_item_key
+        tests: [unique, not_null]
+      - name: order_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_orders')
+                field: order_id
+      - name: price
+        tests: [not_null]
+
+  - name: fct_orders
+    description: >
+      One row per order. Item and payment measures aggregated to order
+      grain before joining to prevent fan-out. 775 orders have no line
+      items (mostly unavailable/canceled); their measures are zero.
+    tests:
+      - dbt_utils.equal_rowcount:
+          arguments:
+            compare_model: ref('stg_orders')
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+      - name: customer_unique_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_unique_id
+  - name: int_reviews__deduplicated
+    description: >
+      One row per order. Orders with multiple reviews (547) keep only the
+      most recent. Note: 789 reviews are linked to more than one order, so
+      a review_score on fct_orders is not unique to that order — counting
+      reviews from fct_orders will overcount. Use fct_order_reviews for
+      accurate review-level analysis.
+  - name: fct_orders
+    description: >
+      One row per order (99,441). Item and payment measures are aggregated
+      to order grain before joining to prevent fan-out. 775 orders have no
+      line items — mostly unavailable or canceled — and their measures are
+      zero rather than null. 768 orders have no review; review_score is
+      null for those.
+  - name: int_customers_deduplicated
+    description: >
+      One row per customer_unique_id. Olist issues a new customer_id for every
+      order placed, so stg_customers holds one row per order (99,441) rather
+      than one per person (96,096). This model collapses to person grain,
+      keeping the row from the customer's most recent order so location
+      reflects where they are now. Required for any repeat-purchase or
+      lifetime-value analysis — at customer_id grain every customer looks
+      like a one-time buyer.
+    columns:
+      - name: customer_unique_id
+        description: Stable identifier for the person across all their orders.
+        tests: [unique, not_null]
+
+  - name: int_payments_aggregated_orders
+    description: >
+      One row per order. Payments arrive at payment grain (103,886 rows) —
+      an order paid in installments or split across payment methods has
+      several rows. Joining that directly to order-grain models would
+      duplicate order rows once per payment and double every measure, so
+      payments are collapsed here first. payment_type and payment_installments
+      are lost in the aggregation; use stg_order_payments for payment-level detail.
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+      - name: total_payment_value
+        tests: [not_null]
+
+  - name: int_reviews_deduplicated
+    description: >
+      One row per order. 547 orders carry more than one review; this keeps the
+      most recent by review_creation_date. Known limitation — 789 reviews are
+      linked to multiple orders in the source, so the same review_score appears
+      against each of those orders. review_score is therefore an attribute of
+      the order's reviewed experience, not a unique review. Counting reviews
+      from fct_orders will overcount; use stg_order_reviews for review-level counts.
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+
+  - name: fct_orders
+    description: >
+      One row per order (99,441). Item measures are aggregated from
+      fct_order_items and payment measures come from int_payments_aggregated_orders,
+      both collapsed to order grain before joining so no join can fan out;
+      equal_rowcount against stg_orders enforces this. 775 orders have no line
+      items — almost all unavailable or canceled — and their item and payment
+      measures are zero rather than null, since zero items is a true statement
+      about those orders. 768 orders have no review and review_score is left
+      null, because unreviewed is different from a score of zero. Three orders
+      (one shipped, two invoiced) have no line items despite statuses that imply
+      they should — apparent source data error, left uncorrected.
+    tests:
+      - dbt_utils.equal_rowcount:
+          arguments:
+            compare_model: ref('stg_orders')
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+      - name: customer_unique_id
+        description: Foreign key to dim_customers.
+      - name: review_score
+        description: Null where the order was never reviewed.
+
+  - name: fct_order_items
+    description: >
+      One row per item within an order (112,650). An order containing three
+      products produces three rows. This is the finest-grained fact in the
+      project — order-level totals are aggregated up from here. Uses a
+      surrogate key because the natural key is composite (order_id, order_item_id).
+    columns:
+      - name: order_item_key
+        tests: [unique, not_null]
+
+  - name: dim_customers
+    description: One row per customer_unique_id. Location from the most recent order.
+    columns:
+      - name: customer_unique_id
+        tests: [unique, not_null]
+
+  - name: dim_products
+    description: >
+      One row per product. Category names translated to English via the
+      product_category_name_translation seed; products with no category
+      mapping are labelled 'unknown'.
+    columns:
+      - name: product_id
+        tests: [unique, not_null]
+
+  - name: dim_sellers
+    description: One row per seller.
+    columns:
+      - name: seller_id
+        tests: [unique, not_null]
